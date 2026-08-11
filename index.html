@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Mobile VS Code - Google Drive</title>
+    
+    <!-- 引入 VS Code 風格字型與 Monaco Editor 載入器 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
+
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body, html { width: 100%; height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1e1e1e; color: #cccccc; }
+
+        /* 主佈局 */
+        .app-container { display: flex; height: 100vh; width: 100vw; }
+        
+        /* 側邊欄 (File Explorer) */
+        .sidebar { width: 260px; background: #252526; border-right: 1px solid #333; display: flex; flex-direction: column; transition: transform 0.3s ease; }
+        .sidebar-header { padding: 12px; background: #2d2d2d; font-size: 12px; font-weight: bold; text-transform: uppercase; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; }
+        .file-list { flex: 1; overflow-y: auto; padding: 5px; }
+        .file-item { padding: 8px 12px; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 8px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .file-item:hover { background: #2a2d2e; }
+        .file-item.active { background: #37373d; color: #ffffff; }
+
+        /* 主編輯區 */
+        .main-pane { flex: 1; display: flex; flex-direction: column; height: 100%; min-width: 0; }
+        
+        /* 頂部工具列 (流動裝置優化：加入 Save, Undo, Redo) */
+        .toolbar { height: 45px; background: #2d2d2d; border-bottom: 1px solid #333; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; }
+        .toolbar-left, .toolbar-right { display: flex; align-items: center; gap: 8px; }
+        .current-file { font-size: 13px; color: #ffffff; font-weight: 500; }
+        
+        .btn { background: #3c3c3c; color: #fff; border: none; padding: 6px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; display: flex; align-items: center; gap: 5px; }
+        .btn:active { background: #0e639c; }
+        .btn-primary { background: #0e639c; }
+
+        /* 編輯器容器 */
+        #editor-container { flex: 1; width: 100%; height: calc(100% - 45px); }
+
+        /* 手機響應式控制 */
+        @media (max-width: 768px) {
+            .sidebar { position: absolute; z-index: 10; height: 100%; transform: translateX(-100%); }
+            .sidebar.open { transform: translateX(0); }
+        }
+    </style>
+</head>
+<body>
+
+<div class="app-container">
+    <!-- 檔案總管 (Google Drive) -->
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <span><i class="fa-brands fa-google-drive"></i> Google Drive</span>
+            <button class="btn" onclick="toggleSidebar()"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div class="file-list" id="fileList">
+            <div class="file-item" onclick="authClick()"><i class="fa-solid fa-key"></i> 點擊登入 Google 帳號</div>
+        </div>
+    </div>
+
+    <!-- 右側主編輯區 -->
+    <div class="main-pane">
+        <div class="toolbar">
+            <div class="toolbar-left">
+                <button class="btn" onclick="toggleSidebar()"><i class="fa-solid fa-bars"></i></button>
+                <span class="current-file" id="currentFileName">未選擇檔案</span>
+            </div>
+            <div class="toolbar-right">
+                <button class="btn" onclick="editor.trigger('keyboard', 'undo', null)"><i class="fa-solid fa-rotate-left"></i></button>
+                <button class="btn" onclick="editor.trigger('keyboard', 'redo', null)"><i class="fa-solid fa-rotate-right"></i></button>
+                <button class="btn btn-primary" onclick="saveFile()"><i class="fa-solid fa-floppy-disk"></i> 儲存</button>
+            </div>
+        </div>
+        <div id="editor-container"></div>
+    </div>
+</div>
+
+<!-- Google API Client Library -->
+<script async defer src="https://apis.google.com/js/api.js" onload="gapiLoaded()"></script>
+<script async defer src="https://accounts.google.com/gsi/client" onload="gisLoaded()"></script>
+
+<script>
+    let editor;
+    let tokenClient;
+    let gapiInited = false;
+    let gisInited = false;
+    let currentFileId = null;
+
+    // 初始化 Monaco Editor (VS Code 核心)
+    require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min' }});
+    require(['vs/editor/editor.main'], function() {
+        editor = monaco.editor.create(document.getElementById('editor-container'), {
+            value: '// 歡迎使用流動版 VS Code 編輯器\n// 請先點擊左上角選單登入 Google Drive 載入檔案',
+            language: 'javascript',
+            theme: 'vs-dark',
+            automaticLayout: true,
+            fontSize: 14,
+            minimap: { enabled: false } // 手機介面關閉縮圖以節省空間
+        });
+    });
+
+    function toggleSidebar() {
+        document.getElementById('sidebar').classList.toggle('open');
+    }
+
+    // --- Google API 認證與 Drive 整合 ---
+    const CLIENT_ID = '你的_GOOGLE_CLIENT_ID.apps.googleusercontent.com'; // 需要到 Google Cloud Console 申請
+    const SCOPES = 'https://www.googleapis.com/auth/drive.file';
+
+    function gapiLoaded() {
+        gapi.load('client', initializeGapiClient);
+    }
+
+    async function initializeGapiClient() {
+        await gapi.client.init({ discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'] });
+        gapiInited = true;
+    }
+
+    function gisLoaded() {
+        tokenClient = google.accounts.oauth2.initTokenClient({
+            client_id: CLIENT_ID,
+            scope: SCOPES,
+            callback: (resp) => {
+                if (resp.error !== undefined) { throw (resp); }
+                listDriveFiles();
+            }
+        });
+        gisInited = true;
+    }
+
+    function authClick() {
+        if (tokenClient) {
+            tokenClient.requestAccessToken({ prompt: 'consent' });
+        }
+    }
+
+    // 讀取 Google Drive 檔案清單
+    async function listDriveFiles() {
+        try {
+            let response = await gapi.client.drive.files.list({
+                pageSize: 30,
+                fields: "files(id, name, mimeType)"
+            });
+            let files = response.result.files;
+            let listEl = document.getElementById('fileList');
+            listEl.innerHTML = '';
+            
+            if (files.length == 0) {
+                listEl.innerHTML = '<div class="file-item">沒有找到檔案</div>';
+                return;
+            }
+
+            files.forEach(file => {
+                let item = document.createElement('div');
+                item.className = 'file-item';
+                item.innerHTML = `<i class="fa-regular fa-file-code"></i> ${file.name}`;
+                item.onclick = () => loadFileContent(file.id, file.name);
+                listEl.appendChild(item);
+            });
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    // 載入指定檔案內容
+    async function loadFileContent(fileId, fileName) {
+        currentFileId = fileId;
+        document.getElementById('currentFileName').innerText = fileName;
+        if (window.innerWidth <= 768) toggleSidebar(); // 手機版選擇後自動收起側邊欄
+
+        try {
+            let response = await gapi.client.drive.files.get({
+                fileId: fileId,
+                alt: 'media'
+            });
+            editor.setValue(response.body);
+            
+            // 自動偵測語言
+            let ext = fileName.split('.').pop();
+            let lang = 'plaintext';
+            if (ext === 'js') lang = 'javascript';
+            else if (ext === 'py') lang = 'python';
+            else if (ext === 'json') lang = 'json';
+            else if (ext === 'html') lang = 'html';
+            monaco.editor.setModelLanguage(editor.getModel(), lang);
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    // 儲存檔案返 Google Drive
+    async function saveFile() {
+        if (!currentFileId) {
+            alert('未選擇任何 Google Drive 檔案！');
+            return;
+        }
+        let content = editor.getValue();
+        try {
+            await gapi.client.request({
+                path: `/upload/drive/v3/files/${currentFileId}`,
+                method: 'PATCH',
+                params: { uploadType: 'media' },
+                body: content
+            });
+            alert('✅ 儲存成功！');
+        } catch (err) {
+            console.error(err);
+            alert('❌ 儲存失敗');
+        }
+    }
+</script>
+
+</body>
+</html>
