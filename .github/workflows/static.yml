@@ -41,8 +41,3 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
-      - name: Inject Google Client ID
-        env:
-          CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-        run: |
-          sed -i 's/__GOOGLE_CLIENT_ID__/'"$CLIENT_ID"'/g' index.html
